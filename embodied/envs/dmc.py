@@ -4,9 +4,13 @@ import os
 import elements
 import embodied
 import numpy as np
-from dm_control import manipulation
 from dm_control import suite
-from dm_control.locomotion.examples import basic_rodent_2020
+try:
+  from dm_control import manipulation
+  from dm_control.locomotion.examples import basic_rodent_2020
+except ImportError:
+  manipulation = None
+  basic_rodent_2020 = None
 
 from . import from_dm
 

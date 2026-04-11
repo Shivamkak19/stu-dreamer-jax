@@ -9,6 +9,8 @@ import jax.numpy as jnp
 import ninjax as nj
 import numpy as np
 
+from . import stu
+
 f32 = jnp.float32
 sg = jax.lax.stop_gradient
 
@@ -30,6 +32,11 @@ class RSSM(nj.Module):
   absolute: bool = False
   blocks: int = 8
   free_nats: float = 1.0
+  use_stu: bool = False
+  stu_num_eigh: int = 24
+  stu_max_seq: int = 64
+  stu_use_hankel_L: bool = False
+  stu_units: int = 0
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -70,6 +77,22 @@ class RSSM(nj.Module):
           lambda carry, inputs: self._observe(
               carry, *inputs, training),
           carry, (tokens, action, reset), unroll=unroll, axis=1)
+      if self.use_stu:
+        # Causal STU refinement of the deter chain, then recompute the
+        # posterior from the refined deter + tokens so that loss()'s KL
+        # compares prior and posterior derived from the SAME hidden state.
+        refined = self._apply_stu(entries['deter'])
+        flat_tokens = tokens.reshape((*refined.shape[:-1], -1))
+        x = flat_tokens if self.absolute else jnp.concatenate(
+            [refined, flat_tokens], -1)
+        for i in range(self.obslayers):
+          x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+          x = nn.act(self.act)(self.sub(
+              f'obs{i}norm', nn.Norm, self.norm)(x))
+        new_logit = self._logit('obslogit', x)
+        new_stoch = nn.cast(self._dist(new_logit).sample(seed=nj.seed()))
+        feat = {**feat, 'deter': refined,
+                'logit': new_logit, 'stoch': new_stoch}
       return carry, entries, feat
 
   def _observe(self, carry, tokens, action, reset, training):
@@ -112,6 +135,15 @@ class RSSM(nj.Module):
         carry, (feat, action) = nj.scan(
             lambda c, a: self.imagine(c, a, 1, training, single=True),
             nn.cast(carry), nn.cast(policy), length, unroll=unroll, axis=1)
+      if self.use_stu:
+        # Refine imagined deter chain with STU, then recompute the prior
+        # logit and resample stoch from the refined posterior so that the
+        # actor-critic and KL see a consistent (deter, logit, stoch) tuple.
+        refined = self._apply_stu(feat['deter'])
+        new_logit = self._prior(refined)
+        new_stoch = nn.cast(self._dist(new_logit).sample(seed=nj.seed()))
+        feat = {**feat, 'deter': refined,
+                'logit': new_logit, 'stoch': new_stoch}
       # We can also return all carry entries but it might be expensive.
       # entries = dict(deter=feat['deter'], stoch=feat['stoch'])
       # return carry, entries, feat, action
@@ -157,6 +189,21 @@ class RSSM(nj.Module):
     update = jax.nn.sigmoid(update - 1)
     deter = update * cand + (1 - update) * deter
     return deter
+
+  def _apply_stu(self, deter_seq):
+    """Apply STU spectral refinement to a sequence of deter states.
+    Returns refined deter with same shape, added as a gated residual."""
+    units = self.stu_units or self.hidden
+    stu_out = self.sub(
+        'stu', stu.STUMixer, units,
+        num_eigh=self.stu_num_eigh,
+        max_seq_len=self.stu_max_seq,
+        use_hankel_L=self.stu_use_hankel_L,
+        **self.kw)(nn.cast(deter_seq))
+    stu_out = nn.act(self.act)(self.sub('stunorm', nn.Norm, self.norm)(stu_out))
+    kw = {**self.kw, 'outscale': 0.01}
+    residual = self.sub('stuproj', nn.Linear, self.deter, **kw)(stu_out)
+    return nn.cast(deter_seq + residual)
 
   def _prior(self, feat):
     x = feat
