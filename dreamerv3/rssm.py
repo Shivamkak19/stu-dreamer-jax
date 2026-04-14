@@ -41,6 +41,12 @@ class RSSM(nj.Module):
   # 'core'    = Run B: STU runs inside _core on a rolling action-history
   #             buffer kept in carry, and feeds into the GRU as a 4th input.
   stu_mode: str = 'posthoc'
+  stu_random: bool = False
+  stu_random_normalized: bool = False
+  stu_neg_bank: bool = False
+  stu_outscale: float = 0.0
+  stu_shortcut: bool = False
+  stu_use_obs: bool = False
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -73,6 +79,9 @@ class RSSM(nj.Module):
     if self.use_stu and self.stu_mode == 'core':
       carry['stu_buffer'] = jnp.zeros(
           [bsize, self.stu_max_seq, self._action_dim], f32)
+      if self.stu_use_obs:
+        carry['stu_obs_buffer'] = jnp.zeros(
+            [bsize, self.stu_max_seq, self.stoch * self.classes], f32)
     return nn.cast(carry)
 
   def truncate(self, entries, carry=None):
@@ -86,6 +95,9 @@ class RSSM(nj.Module):
       bsize = new_carry['deter'].shape[0]
       new_carry['stu_buffer'] = nn.cast(jnp.zeros(
           [bsize, self.stu_max_seq, self._action_dim], f32))
+      if self.stu_use_obs:
+        new_carry['stu_obs_buffer'] = nn.cast(jnp.zeros(
+            [bsize, self.stu_max_seq, self.stoch * self.classes], f32))
     return new_carry
 
   def starts(self, entries, carry, nlast):
@@ -107,8 +119,12 @@ class RSSM(nj.Module):
     if 'stu_buffer' in carry:
       return carry
     bsize = jax.tree.leaves(carry)[0].shape[0]
-    return {**carry, 'stu_buffer': nn.cast(jnp.zeros(
+    carry = {**carry, 'stu_buffer': nn.cast(jnp.zeros(
         [bsize, self.stu_max_seq, self._action_dim], f32))}
+    if self.stu_use_obs and 'stu_obs_buffer' not in carry:
+      carry['stu_obs_buffer'] = nn.cast(jnp.zeros(
+          [bsize, self.stu_max_seq, self.stoch * self.classes], f32))
+    return carry
 
   def observe(self, carry, tokens, action, reset, training, single=False):
     carry = self._ensure_stu_buffer(carry)
@@ -143,11 +159,16 @@ class RSSM(nj.Module):
     action = nn.mask(action, ~reset)
     if self.use_stu and self.stu_mode == 'core':
       buffer = nn.mask(carry['stu_buffer'], ~reset)
-      buffer, stu_ctx = self._stu_step(buffer, action)
+      obs_buffer = None
+      if self.stu_use_obs:
+        obs_buffer = nn.mask(carry['stu_obs_buffer'], ~reset)
+      buffer, obs_buffer, stu_ctx = self._stu_step(
+          buffer, action, stoch, obs_buffer)
       deter = self._core(deter, stoch, action, stu_ctx)
     else:
       deter = self._core(deter, stoch, action)
       buffer = None
+      obs_buffer = None
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     for i in range(self.obslayers):
@@ -158,6 +179,8 @@ class RSSM(nj.Module):
     carry = dict(deter=deter, stoch=stoch)
     if buffer is not None:
       carry['stu_buffer'] = buffer
+    if obs_buffer is not None:
+      carry['stu_obs_buffer'] = obs_buffer
     feat = dict(deter=deter, stoch=stoch, logit=logit)
     entry = dict(deter=deter, stoch=stoch)
     assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
@@ -169,16 +192,21 @@ class RSSM(nj.Module):
       action = policy(sg(carry)) if callable(policy) else policy
       actemb = nn.DictConcat(self.act_space, 1)(action)
       if self.use_stu and self.stu_mode == 'core':
-        buffer, stu_ctx = self._stu_step(carry['stu_buffer'], actemb)
+        obs_buffer = carry.get('stu_obs_buffer', None)
+        buffer, obs_buffer, stu_ctx = self._stu_step(
+            carry['stu_buffer'], actemb, carry['stoch'], obs_buffer)
         deter = self._core(carry['deter'], carry['stoch'], actemb, stu_ctx)
       else:
         deter = self._core(carry['deter'], carry['stoch'], actemb)
         buffer = None
+        obs_buffer = None
       logit = self._prior(deter)
       stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
       new_carry = dict(deter=deter, stoch=stoch)
       if buffer is not None:
         new_carry['stu_buffer'] = buffer
+      if obs_buffer is not None:
+        new_carry['stu_obs_buffer'] = obs_buffer
       carry = nn.cast(new_carry)
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
@@ -251,26 +279,45 @@ class RSSM(nj.Module):
     deter = update * cand + (1 - update) * deter
     return deter
 
-  def _stu_step(self, buffer, action):
-    """Slide the action-history buffer by one and apply STUCore.
+  def _stu_step(self, buffer, action, stoch, obs_buffer=None):
+    """Slide buffers by one and apply STUCore.
 
-    buffer: (B, W, action_dim) — oldest first, newest last.
-    action: (B, action_dim)    — current step's masked, dict-concat action.
+    buffer:     (B, W, action_dim) — action history.
+    action:     (B, action_dim)    — current step's masked, dict-concat action.
+    stoch:      (B, stoch, classes) — previous timestep's stoch from carry.
+    obs_buffer: (B, W, stoch*classes) or None — observation (stoch) history.
 
     Returns:
-      new_buffer: (B, W, action_dim) with the current action appended.
-      stu_ctx:    (B, units)        — spectral context at the current step.
+      new_buffer:     updated action buffer
+      new_obs_buffer: updated obs buffer (or None)
+      stu_ctx:        (B, units) — combined spectral context
     """
     new_buffer = jnp.concatenate(
         [buffer[:, 1:, :], action[:, None, :].astype(buffer.dtype)], axis=1)
     units = self.stu_units or self.hidden
-    stu_ctx = self.sub(
-        'stu', stu.STUCore, units,
+    stu_kw = dict(
         num_eigh=self.stu_num_eigh,
         max_seq_len=self.stu_max_seq,
         use_hankel_L=self.stu_use_hankel_L,
-        **self.kw)(new_buffer)
-    return new_buffer, nn.cast(stu_ctx)
+        random=self.stu_random,
+        random_normalized=self.stu_random_normalized,
+        use_neg_bank=self.stu_neg_bank,
+        outscale=self.stu_outscale,
+        use_shortcut=self.stu_shortcut)
+    stu_ctx = self.sub(
+        'stu_act', stu.STUCore, units, **stu_kw, **self.kw)(new_buffer)
+
+    new_obs_buffer = None
+    if obs_buffer is not None:
+      stoch_flat = stoch.reshape((stoch.shape[0], -1))
+      new_obs_buffer = jnp.concatenate(
+          [obs_buffer[:, 1:, :],
+           stoch_flat[:, None, :].astype(obs_buffer.dtype)], axis=1)
+      obs_ctx = self.sub(
+          'stu_obs', stu.STUCore, units, **stu_kw, **self.kw)(new_obs_buffer)
+      stu_ctx = stu_ctx + obs_ctx
+
+    return new_buffer, new_obs_buffer, nn.cast(stu_ctx)
 
   def _apply_stu(self, deter_seq):
     """Apply STU spectral refinement to a sequence of deter states.
@@ -281,6 +328,8 @@ class RSSM(nj.Module):
         num_eigh=self.stu_num_eigh,
         max_seq_len=self.stu_max_seq,
         use_hankel_L=self.stu_use_hankel_L,
+        random=self.stu_random,
+        random_normalized=self.stu_random_normalized,
         **self.kw)(nn.cast(deter_seq))
     stu_out = nn.act(self.act)(self.sub('stunorm', nn.Norm, self.norm)(stu_out))
     kw = {**self.kw, 'outscale': 0.01}

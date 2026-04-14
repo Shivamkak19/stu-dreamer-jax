@@ -88,7 +88,7 @@ defaults:
     ac_grads: False
     dyn:
       typ: rssm
-      rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, use_stu: False, stu_num_eigh: 24, stu_max_seq: 64, stu_use_hankel_L: False, stu_units: 0, stu_mode: posthoc}
+      rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, use_stu: False, stu_num_eigh: 24, stu_max_seq: 64, stu_use_hankel_L: False, stu_units: 0, stu_mode: posthoc, stu_random: False, stu_random_normalized: False, stu_neg_bank: False, stu_outscale: 0.0, stu_shortcut: False, stu_use_obs: False}
     enc:
       typ: simple
       simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
@@ -175,6 +175,12 @@ crafter:
   task: crafter_reward
   run: {steps: 1.1e6, envs: 1, train_ratio: 512}
 
+dmc_proprio_12m:
+  <<: *size12m
+  task: dmc_walker_walk
+  env.dmc.image: False
+  run: {steps: 1.1e6, train_ratio: 1024}
+
 dmc_proprio:
   <<: *size1m
   task: dmc_walker_walk
@@ -210,6 +216,28 @@ stu_core:
   agent.dyn.rssm.stu_use_hankel_L: False
   agent.dyn.rssm.stu_units: 0
   agent.dyn.rssm.stu_mode: core
+
+stu_rand:
+  agent.dyn.rssm.use_stu: True
+  agent.dyn.rssm.stu_num_eigh: 24
+  agent.dyn.rssm.stu_max_seq: 64
+  agent.dyn.rssm.stu_use_hankel_L: False
+  agent.dyn.rssm.stu_units: 0
+  agent.dyn.rssm.stu_mode: core
+  agent.dyn.rssm.stu_random: True
+  agent.dyn.rssm.stu_random_normalized: True
+
+stu_plus:
+  agent.dyn.rssm.use_stu: True
+  agent.dyn.rssm.stu_num_eigh: 48
+  agent.dyn.rssm.stu_max_seq: 64
+  agent.dyn.rssm.stu_use_hankel_L: False
+  agent.dyn.rssm.stu_units: 0
+  agent.dyn.rssm.stu_mode: core
+  agent.dyn.rssm.stu_neg_bank: True
+  agent.dyn.rssm.stu_outscale: 0.01
+  agent.dyn.rssm.stu_shortcut: True
+  agent.dyn.rssm.stu_use_obs: True
 
 multicpu:
   batch_size: 12

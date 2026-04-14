@@ -14,8 +14,8 @@ import numpy as np
 
 RUNS = {
     'baseline (use_stu=False)': '/home/ubuntu/dreamer_runs/baseline_proprio_20260411T173021/scores.jsonl',
-    'stuB (stu_mode=core)':     None,  # filled in below
-    'stuA (stu_mode=posthoc)':  None,
+    'stuB (spectral filters)':  None,
+    'stuRand (random filters)': None,
 }
 
 
@@ -27,8 +27,8 @@ def latest(prefix):
     return str(matches[-1] / 'scores.jsonl')
 
 
-RUNS['stuB (stu_mode=core)'] = latest('stuB_proprio_')
-RUNS['stuA (stu_mode=posthoc)'] = latest('stuA_proprio_')
+RUNS['stuB (spectral filters)'] = latest('stuB_proprio_')
+RUNS['stuRand (random filters)'] = latest('stuRand_proprio_')
 
 
 def load(path):

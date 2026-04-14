@@ -123,6 +123,33 @@ Model: 12M-equivalent size (`deter=512, hidden=64, stoch=32, classes=4`).
 
 ![Comparison plot](compare_runs.png)
 
+### Random filter ablation
+
+To verify that the improvement comes specifically from the Hankel eigenvectors and not from the extra parameters, action-history buffer, or FFT convolution structure, we ran an ablation using **Haar-random orthonormal filters with matched energy spectrum** (`stu_rand` preset). This replaces the Hankel eigenvectors with random orthonormal directions scaled by the same σ^{1/4} eigenvalue profile — controlling for everything except the specific filter directions.
+
+| env step bin | baseline | STU spectral | STU random |
+|---|---|---|---|
+| 64-96k | 141 ± 56 | 206 ± 100 | **279 ± 157** |
+| 128-160k | **513 ± 43** | 467 ± 66 | 425 ± 172 |
+| 192-224k | 529 ± 74 | **613 ± 59** | 570 ± 71 |
+| 256-288k | 648 ± 48 | **721 ± 66** | 615 ± 71 |
+| 320-352k | 748 ± 46 | **918 ± 32** | 600 ± 46 |
+
+Random filters start fast (279 at 64-96k) but stall at ~600 from step 256k–416k, falling well behind baseline. They eventually break out and converge to ~921 by step 496k — but this is 25% slower than baseline and 55% slower than spectral filters.
+
+| | env steps to 920+ | converged score (last 50) |
+|---|---|---|
+| **STU spectral** | **~320k** | **965 ± 14** |
+| baseline | ~400k | 940 ± 24 |
+| STU random | ~496k | 921 ± 28 |
+
+All three eventually converge near the same asymptote (~920–965). The spectral basis does not unlock new representational capacity — it provides the **right inductive bias** for fast temporal learning. Random orthonormal filters provide a wrong bias the model must learn around, actively slowing convergence by ~25% vs baseline (and ~55% vs spectral).
+
+This confirms:
+- The improvement is **not** from extra parameters (+1.4%) or the action-buffer architecture — random filters have the same params and architecture but converge slower than baseline.
+- The improvement is **not** from "any temporal mixing via FFT convolution" — random FFT convolution hurts.
+- The improvement is **specifically** from the Hankel eigenvectors — the provably efficient basis that approximates bounded LDS dynamics per Theorem 3.1 of the STU paper.
+
 ## References
 
 - Agarwal, N., Suo, D., Chen, X., & Hazan, E. (2024). Spectral State Space Models. arXiv:2312.06837.
