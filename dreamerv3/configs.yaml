@@ -88,7 +88,7 @@ defaults:
     ac_grads: False
     dyn:
       typ: rssm
-      rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, use_stu: False, stu_num_eigh: 24, stu_max_seq: 64, stu_use_hankel_L: False, stu_units: 0, stu_mode: posthoc, stu_random: False, stu_random_normalized: False, stu_neg_bank: False, stu_outscale: 0.0, stu_shortcut: False, stu_use_obs: False}
+      rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, use_stu: False, stu_num_eigh: 24, stu_max_seq: 64, stu_use_hankel_L: False, stu_units: 0, stu_mode: posthoc, stu_random: False, stu_random_normalized: False, stu_neg_bank: False, stu_outscale: 0.0, stu_shortcut: False, stu_use_obs: False, stu_basis: hankel}
     enc:
       typ: simple
       simple: {depth: 64, mults: [2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: trunc_normal_in, symlog: True, outer: False, kernel: 5, strided: False}
@@ -238,6 +238,49 @@ stu_plus:
   agent.dyn.rssm.stu_outscale: 0.01
   agent.dyn.rssm.stu_shortcut: True
   agent.dyn.rssm.stu_use_obs: True
+
+# stu_plus with orthonormal Fourier basis (sigma^{1/4} energy matched to Hankel)
+# instead of Hankel eigenvectors. Apples-to-apples with stuRand / stuB / stuPlus.
+stu_plus_fourier:
+  agent.dyn.rssm.use_stu: True
+  agent.dyn.rssm.stu_num_eigh: 48
+  agent.dyn.rssm.stu_max_seq: 64
+  agent.dyn.rssm.stu_use_hankel_L: False
+  agent.dyn.rssm.stu_units: 0
+  agent.dyn.rssm.stu_mode: core
+  agent.dyn.rssm.stu_neg_bank: True
+  agent.dyn.rssm.stu_outscale: 0.01
+  agent.dyn.rssm.stu_shortcut: True
+  agent.dyn.rssm.stu_use_obs: True
+  agent.dyn.rssm.stu_basis: fourier
+
+# stu_plus tuned for size12m: K scaled with deter, outscale raised so the STU
+# branch isn't drowned by the wider MLP dyn. Use together with dmc_proprio_12m.
+stu_plus_12m_mods:
+  agent.dyn.rssm.use_stu: True
+  agent.dyn.rssm.stu_num_eigh: 192
+  agent.dyn.rssm.stu_max_seq: 256
+  agent.dyn.rssm.stu_use_hankel_L: False
+  agent.dyn.rssm.stu_units: 0
+  agent.dyn.rssm.stu_mode: core
+  agent.dyn.rssm.stu_neg_bank: True
+  agent.dyn.rssm.stu_outscale: 0.1
+  agent.dyn.rssm.stu_shortcut: True
+  agent.dyn.rssm.stu_use_obs: True
+
+# size1m variant with wider RSSM hidden to match stu_plus param count.
+# Used to test whether stuPlus's walker_run win is from the spectral prior
+# vs. just having ~11% more dynamics capacity.
+size1m_matched: &size1m_matched
+  .*\.rssm: {deter: 576, hidden: 72, classes: 4}
+  .*\.depth: 4
+  .*\.units: 72
+
+dmc_proprio_matched:
+  <<: *size1m_matched
+  task: dmc_walker_walk
+  env.dmc.image: False
+  run: {steps: 1.1e6, train_ratio: 1024}
 
 multicpu:
   batch_size: 12

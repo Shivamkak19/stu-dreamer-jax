@@ -47,6 +47,7 @@ class RSSM(nj.Module):
   stu_outscale: float = 0.0
   stu_shortcut: bool = False
   stu_use_obs: bool = False
+  stu_basis: str = 'hankel'
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -303,7 +304,8 @@ class RSSM(nj.Module):
         random_normalized=self.stu_random_normalized,
         use_neg_bank=self.stu_neg_bank,
         outscale=self.stu_outscale,
-        use_shortcut=self.stu_shortcut)
+        use_shortcut=self.stu_shortcut,
+        basis=self.stu_basis)
     stu_ctx = self.sub(
         'stu_act', stu.STUCore, units, **stu_kw, **self.kw)(new_buffer)
 
@@ -330,6 +332,7 @@ class RSSM(nj.Module):
         use_hankel_L=self.stu_use_hankel_L,
         random=self.stu_random,
         random_normalized=self.stu_random_normalized,
+        basis=self.stu_basis,
         **self.kw)(nn.cast(deter_seq))
     stu_out = nn.act(self.act)(self.sub('stunorm', nn.Norm, self.norm)(stu_out))
     kw = {**self.kw, 'outscale': 0.01}

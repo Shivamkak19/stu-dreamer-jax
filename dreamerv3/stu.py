@@ -26,8 +26,28 @@ def get_hankel(seq_len, use_hankel_L=False):
   return 2.0 / (i_plus_j ** 3 - i_plus_j)
 
 
+def _fourier_basis(seq_len, num_eigh):
+  """Orthonormal real Fourier columns of shape (seq_len, num_eigh).
+
+  Column 0 = DC, then alternating (cos, sin) pairs at increasing frequencies,
+  using the standard real-DFT normalization so columns are unit-norm.
+  """
+  t = np.arange(seq_len, dtype=np.float64)
+  cols = []
+  cols.append(np.ones(seq_len) / np.sqrt(seq_len))  # DC
+  j = 1
+  while len(cols) < num_eigh:
+    w = 2.0 * np.pi * j * t / seq_len
+    cols.append(np.cos(w) * np.sqrt(2.0 / seq_len))
+    if len(cols) < num_eigh:
+      cols.append(np.sin(w) * np.sqrt(2.0 / seq_len))
+    j += 1
+  return np.stack(cols, axis=1)  # (seq_len, num_eigh)
+
+
 def get_spectral_filters(seq_len, num_eigh, use_hankel_L=False,
-                         random=False, random_normalized=False, seed=0):
+                         random=False, random_normalized=False,
+                         basis='hankel', seed=0):
   """Spectral basis functions from Hankel eigendecomposition.
 
   random=False (default): true Hankel eigenvectors, scaled by sigma^{1/4}.
@@ -36,6 +56,10 @@ def get_spectral_filters(seq_len, num_eigh, use_hankel_L=False,
     the SAME column-energy spectrum (sigma^{1/4}) as the Hankel basis.
     Isolates whether the specific eigenvectors matter vs random directions
     with matched energy profile.
+  basis='fourier': orthonormal real Fourier columns (DC + cos/sin pairs)
+    scaled by the same sigma^{1/4} energy profile. Isolates whether the
+    *specific* Hankel eigenvectors matter vs any orthonormal basis with
+    matched column-energy. Ignored when random=True.
   """
   if random:
     rng = np.random.RandomState(seed)
@@ -48,6 +72,12 @@ def get_spectral_filters(seq_len, num_eigh, use_hankel_L=False,
       sigma = sigma[-num_eigh:]
       return (q * np.power(np.maximum(sigma, 1e-8), 0.25)).astype(np.float32)
     return rng.randn(seq_len, num_eigh).astype(np.float32)
+  if basis == 'fourier':
+    phi = _fourier_basis(seq_len, num_eigh)  # orthonormal
+    hankel = get_hankel(seq_len, use_hankel_L=use_hankel_L)
+    sigma, _ = np.linalg.eigh(hankel)
+    sigma = sigma[-num_eigh:]
+    return (phi * np.power(np.maximum(sigma, 1e-8), 0.25)).astype(np.float32)
   hankel = get_hankel(seq_len, use_hankel_L=use_hankel_L)
   sigma, phi = np.linalg.eigh(hankel)
   sigma, phi = sigma[-num_eigh:], phi[:, -num_eigh:]
@@ -75,13 +105,15 @@ class STUMixer(nj.Module):
   use_hankel_L: bool = False
   random: bool = False
   random_normalized: bool = False
+  basis: str = 'hankel'
 
   def __init__(self, units, **kw):
     self.units = units
     self.kw = kw
     self._phi = get_spectral_filters(
         self.max_seq_len, self.num_eigh, self.use_hankel_L,
-        random=self.random, random_normalized=self.random_normalized)
+        random=self.random, random_normalized=self.random_normalized,
+        basis=self.basis)
 
   def __call__(self, x):
     # x: (..., seq_len, features) in COMPUTE_DTYPE
@@ -131,13 +163,15 @@ class STUCore(nj.Module):
   use_neg_bank: bool = False
   outscale: float = 0.0
   use_shortcut: bool = False
+  basis: str = 'hankel'
 
   def __init__(self, units, **kw):
     self.units = units
     self.kw = kw
     self._phi = get_spectral_filters(
         self.max_seq_len, self.num_eigh, self.use_hankel_L,
-        random=self.random, random_normalized=self.random_normalized)
+        random=self.random, random_normalized=self.random_normalized,
+        basis=self.basis)
     if self.use_neg_bank and not self.random:
       # (-1)^i modulated filters for negative eigenvalues of A (STU eq 4)
       signs = np.power(-1.0, np.arange(self.max_seq_len)).astype(np.float32)
